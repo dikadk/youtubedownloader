@@ -2,6 +2,8 @@
 
 Local Python backend + Chrome extension for downloading YouTube audio as **MP3**, **FLAC**, **M4A**, or **Opus**. No paywall, no remote API — everything runs on your machine.
 
+![Overlay on YouTube](screenshots/overlay.png)
+
 ## Components
 
 - **`app.py`** — Flask backend. Search YouTube, download via `yt-dlp`, transcode via `ffmpeg`. Optional native window via `pywebview`.
