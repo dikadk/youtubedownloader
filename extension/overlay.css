@@ -1,0 +1,52 @@
+#ytmp3-overlay {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483647;
+  background: #181820;
+  color: #eee;
+  border: 1px solid #2a2a32;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font: 13px -apple-system, system-ui, sans-serif;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  min-width: 240px;
+}
+#ytmp3-overlay .ytmp3-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+#ytmp3-overlay select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2a2a32;
+  background: #0e0e10;
+  color: #eee;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+#ytmp3-overlay button {
+  background: #ff4757;
+  color: #fff;
+  border: 0;
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  font-size: 13px;
+}
+#ytmp3-overlay button:disabled { opacity: 0.6; cursor: not-allowed; }
+#ytmp3-overlay button:hover:not(:disabled) { background: #ff5e6c; }
+#ytmp3-overlay .ytmp3-status { margin-top: 8px; font-size: 12px; color: #9af; min-height: 16px; }
+#ytmp3-overlay .ytmp3-err { color: #f66; }
+#ytmp3-overlay .ytmp3-link { color: #7fffa0; text-decoration: none; font-weight: 600; }
+#ytmp3-overlay .ytmp3-close {
+  position: absolute; top: 4px; right: 8px;
+  background: transparent; color: #666; width: auto; padding: 2px 6px; font-size: 14px;
+}

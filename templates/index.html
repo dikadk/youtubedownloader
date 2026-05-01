@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YT MP3</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0e0e10; color:#eee; margin:0; padding:24px; max-width:760px; margin-inline:auto; }
+  h1 { font-weight:600; letter-spacing:-0.02em; }
+  form { display:flex; gap:8px; margin-bottom:20px; }
+  input[type=text] { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #333; background:#1a1a1d; color:#eee; font-size:15px; }
+  button { padding:12px 18px; border-radius:10px; border:0; background:#ff4757; color:#fff; font-weight:600; cursor:pointer; font-size:14px; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  .item { display:flex; gap:12px; padding:10px; border:1px solid #222; border-radius:12px; margin-bottom:10px; align-items:center; }
+  .item img { width:120px; height:68px; object-fit:cover; border-radius:8px; background:#222; }
+  .meta { flex:1; min-width:0; }
+  .title { font-weight:600; margin:0 0 4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sub { color:#999; font-size:13px; }
+  .dl, .play { padding:8px 14px; border-radius:8px; background:#2d2d33; color:#eee; border:0; cursor:pointer; }
+  .dl:hover, .play:hover { background:#3a3a42; }
+  .play { background:#1a3a5c; }
+  .play:hover { background:#235080; }
+  .actions { display:flex; flex-direction:column; gap:6px; }
+  #player { position:sticky; bottom:0; margin-top:24px; padding:10px; background:#181820; border:1px solid #2a2a32; border-radius:12px; display:none; }
+  #player.show { display:block; }
+  #player .now { font-size:13px; color:#aaa; margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #player audio { width:100%; }
+  .progress { font-size:12px; color:#9af; margin-top:4px; }
+  .err { color:#f66; font-size:13px; margin-top:6px; }
+  a.dlready { color:#7fffa0; font-weight:600; text-decoration:none; }
+  #status { color:#888; font-size:14px; min-height:18px; }
+</style>
+</head>
+<body>
+<h1>YouTube → MP3</h1>
+<form id="searchForm">
+  <input id="q" type="text" placeholder="Song name or artist..." autofocus required>
+  <select id="fmt" style="padding:12px 10px;border-radius:10px;border:1px solid #333;background:#1a1a1d;color:#eee;">
+    <option value="mp3">MP3 192k</option>
+    <option value="flac">FLAC</option>
+    <option value="m4a">M4A</option>
+    <option value="opus">Opus</option>
+  </select>
+  <button type="submit">Search</button>
+</form>
+<div id="status"></div>
+<div id="results"></div>
+<div id="player">
+  <div class="now" id="nowPlaying"></div>
+  <audio id="audio" controls preload="none"></audio>
+</div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const fmtDur = s => {
+  if (!s) return "";
+  s = Math.floor(s);
+  const m = Math.floor(s/60), r = s%60;
+  return `${m}:${String(r).padStart(2,"0")}`;
+};
+
+$("#searchForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("#q").value.trim();
+  if (!q) return;
+  $("#status").textContent = "Searching...";
+  $("#results").innerHTML = "";
+  try {
+    const r = await fetch("/search?q=" + encodeURIComponent(q));
+    const j = await r.json();
+    if (j.error) { $("#status").textContent = "Error: " + j.error; return; }
+    $("#status").textContent = `${j.results.length} results`;
+    render(j.results);
+  } catch (err) {
+    $("#status").textContent = "Error: " + err.message;
+  }
+});
+
+function render(results) {
+  const c = $("#results");
+  c.innerHTML = "";
+  for (const it of results) {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `
+      <img src="${it.thumbnail||''}" alt="">
+      <div class="meta">
+        <p class="title" title="${escapeHtml(it.title)}">${escapeHtml(it.title)}</p>
+        <div class="sub">${escapeHtml(it.uploader||'')} · ${fmtDur(it.duration)}</div>
+        <div class="progress" data-prog></div>
+      </div>
+      <div class="actions">
+        <button class="play">▶ Preview</button>
+        <button class="dl">⬇ MP3</button>
+      </div>
+    `;
+    div.querySelector(".dl").addEventListener("click", () => startDownload(it.id, div));
+    div.querySelector(".play").addEventListener("click", () => playPreview(it, div));
+    c.appendChild(div);
+  }
+}
+
+async function startDownload(id, row) {
+  const btn = row.querySelector(".dl");
+  const prog = row.querySelector("[data-prog]");
+  btn.disabled = true; btn.textContent = "Queued...";
+  prog.textContent = "";
+  const fmt = $("#fmt").value;
+  const r = await fetch("/download", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({id, format: fmt})
+  });
+  const j = await r.json();
+  if (j.error) { prog.innerHTML = `<span class="err">${escapeHtml(j.error)}</span>`; btn.disabled=false; btn.textContent="Retry"; return; }
+  poll(j.job_id, btn, prog);
+}
+
+async function poll(jobId, btn, prog) {
+  const tick = async () => {
+    const r = await fetch("/status/" + jobId);
+    const s = await r.json();
+    if (s.status === "done") {
+      btn.style.display = "none";
+      prog.innerHTML = `<a class="dlready" href="/file/${jobId}">⬇ Save MP3</a>`;
+      return;
+    }
+    if (s.status === "error") {
+      prog.innerHTML = `<span class="err">${escapeHtml(s.error||'failed')}</span>`;
+      btn.disabled = false; btn.textContent = "Retry";
+      return;
+    }
+    btn.textContent = s.status === "processing" ? "Encoding..." : `Downloading ${s.progress||0}%`;
+    setTimeout(tick, 700);
+  };
+  tick();
+}
+
+async function playPreview(it, row) {
+  const btn = row.querySelector(".play");
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Loading...";
+  try {
+    const r = await fetch("/stream/" + encodeURIComponent(it.id));
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    const audio = $("#audio");
+    audio.src = j.url;
+    $("#nowPlaying").textContent = "♪ " + (j.title || it.title);
+    $("#player").classList.add("show");
+    await audio.play();
+  } catch (e) {
+    alert("Preview failed: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+</script>
+</body>
+</html>

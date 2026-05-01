@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "YT MP3 Overlay",
+  "version": "0.1.0",
+  "description": "Download current YouTube video as MP3 via local yt-dlp backend.",
+  "permissions": ["downloads", "storage"],
+  "background": { "service_worker": "background.js" },
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "http://127.0.0.1:5005/*",
+    "http://localhost:5005/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/watch*", "*://m.youtube.com/watch*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "YT MP3 Overlay"
+  }
+}
