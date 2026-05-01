@@ -60,8 +60,34 @@ The overlay re-injects on YouTube SPA navigation. Format choice is persisted in 
 | POST   | `/download`           | `{ "id": "<videoId>", "format": "mp3" }`  | `{ job_id }`                         |
 | GET    | `/status/<jobId>`     |                                           | `{ status, progress, filename, ... }`|
 | GET    | `/file/<jobId>`       |                                           | the audio file                       |
+| GET    | `/playlist?url=<spotifyUrl>` |                                    | `{ name, tracks: [...] }` — Spotify playlist preview |
+| POST   | `/playlist/download`  | `{ "url": "<spotifyUrl>", "format": "mp3" }` | `{ playlist_id, name, count }`   |
+| GET    | `/playlist/status/<plId>` |                                       | `{ status, progress, tracks: [...] }`|
+| GET    | `/playlist/zip/<plId>` |                                          | zip of all completed tracks          |
+| GET    | `/config`             |                                           | `{ download_dir, default, env }`     |
+| POST   | `/config`             | `{ "download_dir": "<path>" }` or `{ "reset": true }` | updated `{ download_dir }` |
 
 Supported formats: `mp3` (192k), `flac` (lossless), `m4a` (passthrough), `opus` (passthrough).
+
+## Spotify playlists
+
+Paste any `open.spotify.com/playlist/...` URL into the search box. The backend scrapes the public embed page (no API auth), then runs each track through `ytsearch1` and downloads as your selected format. Click **Save ZIP** when done. Embed page caps at ~100 tracks.
+
+## Download folder
+
+Files default to `./downloads/` next to `app.py`. Override:
+
+- **Env var**: `YTMP3_DOWNLOAD_DIR=~/Music/YT python app.py --web`
+- **UI**: click ⚙ Settings, set a path, Save. Persisted in `config.json`.
+
+Filenames: single tracks → `Title.ext`, Spotify tracks → `Artist - Title.ext`. Collisions append ` (2)`, ` (3)`, etc.
+
+To clean up old prefixed files (e.g. `pl0abe5aa726-001-Title.mp3` → `Title.mp3`):
+
+```bash
+.venv/bin/python scripts/clean_filenames.py            # dry-run
+.venv/bin/python scripts/clean_filenames.py --apply    # rename
+```
 
 ## Architecture notes
 
@@ -71,15 +97,17 @@ Why a backend at all? Pure Chrome extensions cannot transcode to MP3/FLAC — th
 
 ```
 .
-├── app.py                  # Flask backend
+├── app.py                          # Flask backend
 ├── requirements.txt
-├── templates/index.html    # Web UI
+├── templates/index.html            # Web UI (search + playlists + settings)
+├── scripts/clean_filenames.py      # Strip job-id prefixes from old downloads
 ├── extension/
-│   ├── manifest.json       # MV3
-│   ├── content.js          # Injects overlay panel
-│   ├── background.js       # chrome.downloads handler
+│   ├── manifest.json               # MV3
+│   ├── content.js                  # Injects overlay panel
+│   ├── background.js               # chrome.downloads handler
 │   └── overlay.css
-└── downloads/              # Output dir (gitignored)
+├── config.json                     # Persisted download folder (gitignored)
+└── downloads/                      # Default output dir (gitignored)
 ```
 
 ## License

@@ -1,17 +1,65 @@
+import io
+import json
 import os
 import re
 import threading
+import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_from_directory, abort
+from flask import Flask, jsonify, render_template, request, send_from_directory, abort, Response
 from yt_dlp import YoutubeDL
 
 BASE = Path(__file__).parent
-DOWNLOADS = BASE / "downloads"
-DOWNLOADS.mkdir(exist_ok=True)
+DEFAULT_DOWNLOADS = BASE / "downloads"
+CONFIG_PATH = BASE / "config.json"
+STAGING_NAME = ".staging"
 
 app = Flask(__name__)
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+def _resolve_dir(p: str) -> Path:
+    return Path(os.path.expanduser(p)).resolve()
+
+
+def current_download_dir() -> Path:
+    cfg = _load_config()
+    candidate = cfg.get("download_dir") or os.environ.get("YTMP3_DOWNLOAD_DIR") or str(DEFAULT_DOWNLOADS)
+    d = _resolve_dir(candidate)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        d = _resolve_dir(str(DEFAULT_DOWNLOADS))
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def staging_dir() -> Path:
+    s = current_download_dir() / STAGING_NAME
+    s.mkdir(parents=True, exist_ok=True)
+    return s
+
+
+def _unique_path(directory: Path, base: str, ext: str) -> Path:
+    base = base.strip() or "track"
+    candidate = directory / f"{base}{ext}"
+    i = 2
+    while candidate.exists():
+        candidate = directory / f"{base} ({i}){ext}"
+        i += 1
+    return candidate
 
 
 @app.after_request
@@ -29,6 +77,89 @@ def _opts(_p=None):
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
+PLAYLISTS: dict[str, dict] = {}
+PLAYLISTS_LOCK = threading.Lock()
+
+SPOTIFY_PLAYLIST_RE = re.compile(r"(?:open\.spotify\.com/(?:embed/)?playlist/|spotify:playlist:)([A-Za-z0-9]+)")
+
+
+def _safe_name(s: str, maxlen: int = 80) -> str:
+    s = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", s or "").strip(" .")
+    return (s[:maxlen] or "track").strip()
+
+
+def fetch_spotify_playlist(url_or_id: str) -> dict:
+    m = SPOTIFY_PLAYLIST_RE.search(url_or_id) if "/" in url_or_id or ":" in url_or_id else None
+    pid = m.group(1) if m else url_or_id.strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{16,40}", pid):
+        raise ValueError("invalid spotify playlist id")
+    embed = f"https://open.spotify.com/embed/playlist/{pid}"
+    req = urllib.request.Request(embed, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", errors="replace")
+    m2 = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html, re.S)
+    if not m2:
+        raise RuntimeError("could not parse spotify playlist (embed format changed)")
+    data = json.loads(m2.group(1))
+    entity = data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {}) or {}
+    tracks_raw = entity.get("trackList") or []
+    tracks = []
+    for t in tracks_raw:
+        title = (t.get("title") or "").strip()
+        artists = (t.get("subtitle") or "").replace("\xa0", " ").strip()
+        if not title:
+            continue
+        tracks.append({
+            "title": title,
+            "artists": artists,
+            "duration_ms": t.get("duration"),
+            "uri": t.get("uri"),
+            "query": f"{artists} - {title}".strip(" -"),
+        })
+    return {
+        "id": pid,
+        "name": entity.get("name") or "Spotify Playlist",
+        "tracks": tracks,
+    }
+
+
+def run_playlist_download(pl_id: str, fmt: str):
+    pl = PLAYLISTS[pl_id]
+    spec = FORMATS.get(fmt, FORMATS["mp3"])
+    pl["status"] = "running"
+    for idx, item in enumerate(pl["tracks"]):
+        if pl.get("cancelled"):
+            break
+        item["status"] = "searching"
+        try:
+            results = search_youtube(item["query"], limit=1)
+            if not results:
+                raise RuntimeError("no youtube match")
+            vid = results[0]["id"]
+            item["youtube_id"] = vid
+            item["youtube_title"] = results[0]["title"]
+            sub_id = f"{pl_id}-{idx:03d}"
+            with JOBS_LOCK:
+                JOBS[sub_id] = {"status": "queued", "progress": 0.0, "format": fmt}
+            item["job_id"] = sub_id
+            item["status"] = "downloading"
+            final_name = f"{item.get('artists','')} - {item['title']}".strip(" -")
+            run_download(sub_id, f"https://www.youtube.com/watch?v={vid}", fmt, final_name=final_name)
+            sub = JOBS[sub_id]
+            if sub.get("status") == "done":
+                item["status"] = "done"
+                item["filename"] = sub.get("filename")
+                item["path"] = sub.get("path")
+                pl["completed"] += 1
+            else:
+                item["status"] = "error"
+                item["error"] = sub.get("error", "download failed")
+                pl["failed"] += 1
+        except Exception as e:
+            item["status"] = "error"
+            item["error"] = str(e)
+            pl["failed"] += 1
+        pl["progress"] = round((idx + 1) / max(1, len(pl["tracks"])) * 100, 1)
+    pl["status"] = "done"
 
 
 def search_youtube(query: str, limit: int = 10) -> list[dict]:
@@ -69,7 +200,7 @@ FORMATS = {
 }
 
 
-def run_download(job_id: str, video_url: str, fmt: str = "mp3"):
+def run_download(job_id: str, video_url: str, fmt: str = "mp3", *, final_name: str | None = None):
     job = JOBS[job_id]
     spec = FORMATS.get(fmt, FORMATS["mp3"])
 
@@ -84,7 +215,8 @@ def run_download(job_id: str, video_url: str, fmt: str = "mp3"):
             job["status"] = "processing"
             job["progress"] = 99.0
 
-    out_template = str(DOWNLOADS / f"{job_id}-%(title)s.%(ext)s")
+    staging = staging_dir()
+    out_template = str(staging / f"{job_id}.%(ext)s")
     opts = {
         "format": "bestaudio/best",
         "outtmpl": out_template,
@@ -100,12 +232,20 @@ def run_download(job_id: str, video_url: str, fmt: str = "mp3"):
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-        # filename ends as .mp3 after postprocess
         title = info.get("title", "audio")
-        for f in DOWNLOADS.iterdir():
-            if f.name.startswith(job_id) and f.suffix == spec["ext"]:
-                job["filename"] = f.name
+        staged = None
+        for f in staging.iterdir():
+            if f.stem == job_id and f.suffix == spec["ext"]:
+                staged = f
                 break
+        if staged is None:
+            raise RuntimeError(f"staged file not found for job {job_id}")
+        clean_base = _safe_name(final_name or title or "audio")
+        target_dir = current_download_dir()
+        final_path = _unique_path(target_dir, clean_base, spec["ext"])
+        staged.replace(final_path)
+        job["filename"] = final_path.name
+        job["path"] = str(final_path)
         job["title"] = title
         job["status"] = "done"
         job["progress"] = 100.0
@@ -181,10 +321,150 @@ def file(job_id):
     job = JOBS.get(job_id)
     if not job or job.get("status") != "done":
         abort(404)
+    p = job.get("path")
+    if p and Path(p).exists():
+        path = Path(p)
+        return send_from_directory(path.parent, path.name, as_attachment=True)
     fname = job.get("filename")
-    if not fname:
+    if fname and (current_download_dir() / fname).exists():
+        return send_from_directory(current_download_dir(), fname, as_attachment=True)
+    abort(404)
+
+
+@app.route("/pick_folder", methods=["POST"])
+def pick_folder():
+    try:
+        import webview
+        wins = webview.windows
+        if not wins:
+            return jsonify({"error": "no webview window (run as desktop app)"}), 400
+        result = wins[0].create_file_dialog(webview.FOLDER_DIALOG)
+    except ImportError:
+        return jsonify({"error": "pywebview not available"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not result:
+        return jsonify({"cancelled": True})
+    path = result[0] if isinstance(result, (list, tuple)) else result
+    return jsonify({"path": str(path)})
+
+
+@app.route("/config", methods=["GET"])
+def config_get():
+    return jsonify({
+        "download_dir": str(current_download_dir()),
+        "default": str(_resolve_dir(str(DEFAULT_DOWNLOADS))),
+        "env": os.environ.get("YTMP3_DOWNLOAD_DIR"),
+    })
+
+
+@app.route("/config", methods=["POST"])
+def config_set():
+    data = request.get_json(silent=True) or {}
+    raw = (data.get("download_dir") or "").strip()
+    if not raw and data.get("reset"):
+        cfg = _load_config()
+        cfg.pop("download_dir", None)
+        _save_config(cfg)
+        return jsonify({"download_dir": str(current_download_dir())})
+    if not raw:
+        return jsonify({"error": "missing download_dir"}), 400
+    try:
+        d = _resolve_dir(raw)
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".ytmp3_write_test"
+        probe.write_text("ok")
+        probe.unlink()
+    except Exception as e:
+        return jsonify({"error": f"path not writable: {e}"}), 400
+    cfg = _load_config()
+    cfg["download_dir"] = str(d)
+    _save_config(cfg)
+    return jsonify({"download_dir": str(d)})
+
+
+@app.route("/playlist", methods=["GET"])
+def playlist_info():
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "missing url"}), 400
+    try:
+        pl = fetch_spotify_playlist(url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(pl)
+
+
+@app.route("/playlist/download", methods=["POST"])
+def playlist_download():
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    fmt = (data.get("format") or "mp3").lower()
+    if fmt not in FORMATS:
+        return jsonify({"error": f"format must be one of {list(FORMATS)}"}), 400
+    if not url:
+        return jsonify({"error": "missing url"}), 400
+    try:
+        pl = fetch_spotify_playlist(url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    pl_id = "pl" + uuid.uuid4().hex[:10]
+    with PLAYLISTS_LOCK:
+        PLAYLISTS[pl_id] = {
+            "id": pl_id,
+            "name": pl["name"],
+            "spotify_id": pl["id"],
+            "format": fmt,
+            "status": "queued",
+            "progress": 0.0,
+            "completed": 0,
+            "failed": 0,
+            "tracks": [dict(t, status="queued") for t in pl["tracks"]],
+        }
+    threading.Thread(target=run_playlist_download, args=(pl_id, fmt), daemon=True).start()
+    return jsonify({"playlist_id": pl_id, "name": pl["name"], "count": len(pl["tracks"])})
+
+
+@app.route("/playlist/status/<pl_id>")
+def playlist_status(pl_id):
+    pl = PLAYLISTS.get(pl_id)
+    if not pl:
+        return jsonify({"error": "unknown playlist"}), 404
+    return jsonify(pl)
+
+
+@app.route("/playlist/zip/<pl_id>")
+def playlist_zip(pl_id):
+    pl = PLAYLISTS.get(pl_id)
+    if not pl:
         abort(404)
-    return send_from_directory(DOWNLOADS, fname, as_attachment=True)
+    files = []
+    for t in pl["tracks"]:
+        p = t.get("path")
+        if p and Path(p).exists():
+            files.append((t, Path(p)))
+    if not files:
+        abort(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        used = set()
+        for t, path in files:
+            base = _safe_name(f"{t.get('artists','')} - {t['title']}")
+            ext = path.suffix
+            name = base + ext
+            i = 1
+            while name in used:
+                name = f"{base} ({i}){ext}"
+                i += 1
+            used.add(name)
+            zf.write(path, arcname=name)
+    buf.seek(0)
+    fname = _safe_name(pl["name"]) + ".zip"
+    return Response(
+        buf.getvalue(),
+        mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 def run_server():

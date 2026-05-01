@@ -30,12 +30,49 @@
   .err { color:#f66; font-size:13px; margin-top:6px; }
   a.dlready { color:#7fffa0; font-weight:600; text-decoration:none; }
   #status { color:#888; font-size:14px; min-height:18px; }
+  .pl-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; background:#181820; border:1px solid #2a2a32; border-radius:12px; margin-bottom:12px; }
+  .pl-header .name { font-weight:600; font-size:15px; }
+  .pl-header .meta { color:#999; font-size:13px; }
+  .pl-bar { height:6px; background:#2a2a32; border-radius:3px; overflow:hidden; margin-top:6px; }
+  .pl-bar-fill { height:100%; background:#1db954; width:0%; transition:width .3s; }
+  .pl-track { display:flex; align-items:center; gap:10px; padding:8px 12px; border:1px solid #222; border-radius:8px; margin-bottom:6px; font-size:13px; }
+  .pl-track .idx { color:#666; width:28px; text-align:right; }
+  .pl-track .t-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pl-track .t-status { font-size:12px; color:#9af; }
+  .pl-track.done .t-status { color:#7fffa0; }
+  .pl-track.error .t-status { color:#f66; }
+  .header-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .gear { background:none; color:#888; border:1px solid #333; padding:6px 10px; font-size:12px; }
+  .gear:hover { color:#eee; }
+  #settings { display:none; padding:12px 14px; background:#181820; border:1px solid #2a2a32; border-radius:12px; margin-bottom:16px; }
+  #settings.show { display:block; }
+  #settings label { font-size:12px; color:#999; display:block; margin-bottom:4px; }
+  #settings .row { display:flex; gap:8px; align-items:center; }
+  #settings input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #333; background:#1a1a1d; color:#eee; font-size:13px; font-family:ui-monospace,monospace; }
+  #settings .save { background:#1db954; padding:10px 14px; }
+  #settings .reset { background:#2d2d33; padding:10px 14px; }
+  #settings .msg { font-size:12px; margin-top:6px; min-height:16px; }
+  #settings .msg.ok { color:#7fffa0; }
+  #settings .msg.err { color:#f66; }
 </style>
 </head>
 <body>
-<h1>YouTube → MP3</h1>
+<div class="header-row">
+  <h1>YouTube → MP3</h1>
+  <button type="button" class="gear" id="gearBtn">⚙ Settings</button>
+</div>
+<div id="settings">
+  <label>Download folder</label>
+  <div class="row">
+    <input id="dirInput" type="text" placeholder="/path/to/folder" autocomplete="off">
+    <button type="button" class="reset" id="browseDir">Browse…</button>
+    <button type="button" class="save" id="saveDir">Save</button>
+    <button type="button" class="reset" id="resetDir">Reset</button>
+  </div>
+  <div class="msg" id="dirMsg"></div>
+</div>
 <form id="searchForm">
-  <input id="q" type="text" placeholder="Song name or artist..." autofocus required>
+  <input id="q" type="text" placeholder="Song, artist, or Spotify playlist URL..." autofocus required>
   <select id="fmt" style="padding:12px 10px;border-radius:10px;border:1px solid #333;background:#1a1a1d;color:#eee;">
     <option value="mp3">MP3 192k</option>
     <option value="flac">FLAC</option>
@@ -53,6 +90,55 @@
 
 <script>
 const $ = sel => document.querySelector(sel);
+
+async function loadConfig() {
+  try {
+    const r = await fetch("/config");
+    const j = await r.json();
+    $("#dirInput").value = j.download_dir || "";
+    $("#dirInput").placeholder = j.default || "";
+  } catch {}
+}
+
+$("#gearBtn").addEventListener("click", () => {
+  $("#settings").classList.toggle("show");
+  loadConfig();
+});
+
+async function saveDir(reset) {
+  const msg = $("#dirMsg");
+  msg.textContent = "Saving..."; msg.className = "msg";
+  const body = reset ? {reset: true} : {download_dir: $("#dirInput").value.trim()};
+  try {
+    const r = await fetch("/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+    const j = await r.json();
+    if (j.error) { msg.textContent = j.error; msg.className = "msg err"; return; }
+    $("#dirInput").value = j.download_dir || "";
+    msg.textContent = "Saved: " + j.download_dir;
+    msg.className = "msg ok";
+  } catch (e) {
+    msg.textContent = e.message; msg.className = "msg err";
+  }
+}
+$("#saveDir").addEventListener("click", () => saveDir(false));
+$("#resetDir").addEventListener("click", () => saveDir(true));
+
+$("#browseDir").addEventListener("click", async () => {
+  const msg = $("#dirMsg");
+  msg.textContent = "Opening picker..."; msg.className = "msg";
+  try {
+    const r = await fetch("/pick_folder", {method:"POST"});
+    const j = await r.json();
+    if (j.error) { msg.textContent = j.error; msg.className = "msg err"; return; }
+    if (j.cancelled) { msg.textContent = ""; return; }
+    $("#dirInput").value = j.path;
+    msg.textContent = "Picked: " + j.path + " (click Save to apply)";
+    msg.className = "msg ok";
+  } catch (e) {
+    msg.textContent = e.message; msg.className = "msg err";
+  }
+});
+
 const fmtDur = s => {
   if (!s) return "";
   s = Math.floor(s);
@@ -60,12 +146,17 @@ const fmtDur = s => {
   return `${m}:${String(r).padStart(2,"0")}`;
 };
 
+const SPOTIFY_RE = /(?:open\.spotify\.com\/(?:embed\/)?playlist\/|spotify:playlist:)([A-Za-z0-9]+)/;
+
 $("#searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("#q").value.trim();
   if (!q) return;
-  $("#status").textContent = "Searching...";
   $("#results").innerHTML = "";
+  if (SPOTIFY_RE.test(q)) {
+    return loadSpotifyPlaylist(q);
+  }
+  $("#status").textContent = "Searching...";
   try {
     const r = await fetch("/search?q=" + encodeURIComponent(q));
     const j = await r.json();
@@ -76,6 +167,104 @@ $("#searchForm").addEventListener("submit", async (e) => {
     $("#status").textContent = "Error: " + err.message;
   }
 });
+
+async function loadSpotifyPlaylist(url) {
+  $("#status").textContent = "Loading Spotify playlist...";
+  try {
+    const r = await fetch("/playlist?url=" + encodeURIComponent(url));
+    const j = await r.json();
+    if (j.error) { $("#status").textContent = "Error: " + j.error; return; }
+    $("#status").textContent = "";
+    renderPlaylistPreview(j, url);
+  } catch (err) {
+    $("#status").textContent = "Error: " + err.message;
+  }
+}
+
+function renderPlaylistPreview(pl, url) {
+  const c = $("#results");
+  c.innerHTML = "";
+  const header = document.createElement("div");
+  header.className = "pl-header";
+  header.innerHTML = `
+    <div style="flex:1;min-width:0;">
+      <div class="name">${escapeHtml(pl.name)}</div>
+      <div class="meta">${pl.tracks.length} tracks</div>
+    </div>
+    <button id="dlAll">⬇ Download all</button>
+  `;
+  c.appendChild(header);
+  const list = document.createElement("div");
+  list.id = "plList";
+  c.appendChild(list);
+  for (let i = 0; i < pl.tracks.length; i++) {
+    const t = pl.tracks[i];
+    const row = document.createElement("div");
+    row.className = "pl-track";
+    row.innerHTML = `
+      <div class="idx">${i+1}</div>
+      <div class="t-title" title="${escapeHtml(t.query)}">${escapeHtml(t.title)} <span style="color:#888">— ${escapeHtml(t.artists)}</span></div>
+      <div class="t-status">queued</div>
+    `;
+    list.appendChild(row);
+  }
+  $("#dlAll").addEventListener("click", () => startPlaylistDownload(url, pl.tracks.length));
+}
+
+async function startPlaylistDownload(url, count) {
+  const btn = $("#dlAll");
+  btn.disabled = true; btn.textContent = "Starting...";
+  const fmt = $("#fmt").value;
+  const r = await fetch("/playlist/download", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({url, format: fmt})
+  });
+  const j = await r.json();
+  if (j.error) { $("#status").textContent = "Error: " + j.error; btn.disabled=false; btn.textContent="⬇ Download all"; return; }
+  btn.textContent = "Downloading...";
+  // add progress bar
+  const header = document.querySelector(".pl-header");
+  const bar = document.createElement("div");
+  bar.className = "pl-bar";
+  bar.innerHTML = `<div class="pl-bar-fill" id="plFill"></div>`;
+  header.parentNode.insertBefore(bar, header.nextSibling);
+  pollPlaylist(j.playlist_id, btn);
+}
+
+async function pollPlaylist(plId, btn) {
+  const tick = async () => {
+    const r = await fetch("/playlist/status/" + plId);
+    const s = await r.json();
+    const fill = $("#plFill");
+    if (fill) fill.style.width = (s.progress||0) + "%";
+    const rows = document.querySelectorAll("#plList .pl-track");
+    s.tracks.forEach((t, i) => {
+      const row = rows[i];
+      if (!row) return;
+      row.classList.remove("done", "error");
+      const stEl = row.querySelector(".t-status");
+      if (t.status === "done") { row.classList.add("done"); stEl.textContent = "✓ done"; }
+      else if (t.status === "error") { row.classList.add("error"); stEl.textContent = "✗ " + (t.error||"failed"); }
+      else if (t.status === "downloading") { stEl.textContent = "downloading..."; }
+      else if (t.status === "searching") { stEl.textContent = "searching..."; }
+      else { stEl.textContent = t.status; }
+    });
+    if (s.status === "done") {
+      btn.style.display = "none";
+      const header = document.querySelector(".pl-header");
+      const link = document.createElement("a");
+      link.href = "/playlist/zip/" + plId;
+      link.className = "dlready";
+      link.textContent = `⬇ Save ZIP (${s.completed}/${s.tracks.length})`;
+      link.style.padding = "10px 14px";
+      header.appendChild(link);
+      return;
+    }
+    setTimeout(tick, 1500);
+  };
+  tick();
+}
 
 function render(results) {
   const c = $("#results");
