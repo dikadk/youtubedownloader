@@ -81,6 +81,17 @@
   </select>
   <button type="submit">Search</button>
 </form>
+<details id="pasteBox" style="margin-top:10px;">
+  <summary style="cursor:pointer;color:#aaa;">📋 Paste tracklist (timestamps + Title - Artist)</summary>
+  <textarea id="pasteText" rows="8"
+    placeholder="00:00 Song A - Artist A&#10;05:10 Song B - Artist B"
+    style="width:100%;margin-top:8px;padding:10px;border-radius:10px;border:1px solid #333;background:#1a1a1d;color:#eee;font-family:monospace;box-sizing:border-box;"></textarea>
+  <div class="row" style="margin-top:6px;display:flex;gap:8px;">
+    <input id="pasteName" type="text" placeholder="Playlist name (optional)"
+      style="flex:1;padding:10px;border-radius:10px;border:1px solid #333;background:#1a1a1d;color:#eee;">
+    <button type="button" id="pasteParseBtn">Preview</button>
+  </div>
+</details>
 <div id="status"></div>
 <div id="results"></div>
 <div id="player">
@@ -179,6 +190,56 @@ async function loadSpotifyPlaylist(url) {
   } catch (err) {
     $("#status").textContent = "Error: " + err.message;
   }
+}
+
+$("#pasteParseBtn").addEventListener("click", async () => {
+  const text = $("#pasteText").value;
+  const name = $("#pasteName").value.trim() || "Pasted Tracklist";
+  if (!text.trim()) return;
+  $("#status").textContent = "Parsing tracklist...";
+  $("#results").innerHTML = "";
+  try {
+    const r = await fetch("/playlist/parse", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text, name}),
+    });
+    const j = await r.json();
+    if (j.error) { $("#status").textContent = "Error: " + j.error; return; }
+    const skipMsg = j.skipped ? ` (skipped ${j.skipped} non-track lines)` : "";
+    $("#status").textContent = `Parsed ${j.tracks.length} tracks${skipMsg}`;
+    renderPastedPreview(j);
+  } catch (err) {
+    $("#status").textContent = "Error: " + err.message;
+  }
+});
+
+function renderPastedPreview(pl) {
+  renderPlaylistPreview(pl, null);
+  const btn = $("#dlAll");
+  const fresh = btn.cloneNode(true);
+  btn.parentNode.replaceChild(fresh, btn);
+  fresh.addEventListener("click", () => startPastedDownload(pl));
+}
+
+async function startPastedDownload(pl) {
+  const btn = $("#dlAll");
+  btn.disabled = true; btn.textContent = "Starting...";
+  const fmt = $("#fmt").value;
+  const r = await fetch("/playlist/text/download", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: pl.name, tracks: pl.tracks, format: fmt}),
+  });
+  const j = await r.json();
+  if (j.error) { $("#status").textContent = "Error: " + j.error; btn.disabled=false; btn.textContent="⬇ Download all"; return; }
+  btn.textContent = "Downloading...";
+  const header = document.querySelector(".pl-header");
+  const bar = document.createElement("div");
+  bar.className = "pl-bar";
+  bar.innerHTML = `<div class="pl-bar-fill" id="plFill"></div>`;
+  header.parentNode.insertBefore(bar, header.nextSibling);
+  pollPlaylist(j.playlist_id, btn);
 }
 
 function renderPlaylistPreview(pl, url) {

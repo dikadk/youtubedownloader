@@ -82,6 +82,50 @@ PLAYLISTS_LOCK = threading.Lock()
 
 SPOTIFY_PLAYLIST_RE = re.compile(r"(?:open\.spotify\.com/(?:embed/)?playlist/|spotify:playlist:)([A-Za-z0-9]+)")
 
+TRACKLINE_RE = re.compile(
+    r"^\s*[\[\(]?(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[\]\)]?\s*[-–—.)]?\s*(.+?)\s*$"
+)
+DASH_SPLIT_RE = re.compile(r"\s+[-–—]\s+")
+
+
+def parse_tracklist(text: str) -> tuple[list[dict], int]:
+    tracks = []
+    skipped = 0
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = TRACKLINE_RE.match(line)
+        has_ts = m is not None
+        if has_ts:
+            h, mm, ss, rest = m.groups()
+            t_sec = (int(h or 0) * 3600) + (int(mm) * 60) + int(ss)
+        else:
+            rest = line
+            t_sec = None
+        rest = rest.strip(" -–—\t")
+        parts = DASH_SPLIT_RE.split(rest, maxsplit=1)
+        has_dash = len(parts) == 2
+        if not has_ts and not has_dash:
+            skipped += 1
+            continue
+        if has_dash:
+            title, artists = parts[0].strip(), parts[1].strip()
+        else:
+            title, artists = rest, ""
+        if not title:
+            skipped += 1
+            continue
+        tracks.append({
+            "title": title,
+            "artists": artists,
+            "timestamp_sec": t_sec,
+            "duration_ms": None,
+            "uri": None,
+            "query": (f"{artists} - {title}" if artists else title).strip(" -"),
+        })
+    return tracks, skipped
+
 
 def _safe_name(s: str, maxlen: int = 80) -> str:
     s = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", s or "").strip(" .")
@@ -423,6 +467,63 @@ def playlist_download():
         }
     threading.Thread(target=run_playlist_download, args=(pl_id, fmt), daemon=True).start()
     return jsonify({"playlist_id": pl_id, "name": pl["name"], "count": len(pl["tracks"])})
+
+
+@app.route("/playlist/parse", methods=["POST"])
+def playlist_parse():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text") or ""
+    name = (data.get("name") or "Pasted Tracklist").strip() or "Pasted Tracklist"
+    tracks, skipped = parse_tracklist(text)
+    if not tracks:
+        return jsonify({"error": "no tracks parsed", "skipped": skipped}), 400
+    return jsonify({"id": "", "name": name, "tracks": tracks, "skipped": skipped})
+
+
+@app.route("/playlist/text/download", methods=["POST"])
+def playlist_text_download():
+    data = request.get_json(silent=True) or {}
+    fmt = (data.get("format") or "mp3").lower()
+    if fmt not in FORMATS:
+        return jsonify({"error": f"format must be one of {list(FORMATS)}"}), 400
+    name = (data.get("name") or "Pasted Tracklist").strip() or "Pasted Tracklist"
+    tracks = data.get("tracks")
+    if not tracks and data.get("text"):
+        tracks, _ = parse_tracklist(data["text"])
+    if not tracks:
+        return jsonify({"error": "no tracks"}), 400
+    norm = []
+    for t in tracks:
+        title = (t.get("title") or "").strip()
+        if not title:
+            continue
+        artists = (t.get("artists") or "").strip()
+        query = (t.get("query") or (f"{artists} - {title}" if artists else title)).strip(" -")
+        norm.append({
+            "title": title,
+            "artists": artists,
+            "duration_ms": t.get("duration_ms"),
+            "uri": None,
+            "query": query,
+            "timestamp_sec": t.get("timestamp_sec"),
+        })
+    if not norm:
+        return jsonify({"error": "no valid tracks"}), 400
+    pl_id = "pl" + uuid.uuid4().hex[:10]
+    with PLAYLISTS_LOCK:
+        PLAYLISTS[pl_id] = {
+            "id": pl_id,
+            "name": name,
+            "spotify_id": None,
+            "format": fmt,
+            "status": "queued",
+            "progress": 0.0,
+            "completed": 0,
+            "failed": 0,
+            "tracks": [dict(t, status="queued") for t in norm],
+        }
+    threading.Thread(target=run_playlist_download, args=(pl_id, fmt), daemon=True).start()
+    return jsonify({"playlist_id": pl_id, "name": name, "count": len(norm)})
 
 
 @app.route("/playlist/status/<pl_id>")

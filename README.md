@@ -2,13 +2,16 @@
 
 Local Python backend + Chrome extension for downloading YouTube audio as **MP3**, **FLAC**, **M4A**, or **Opus**. No paywall, no remote API — everything runs on your machine.
 
-![Overlay on YouTube](screenshots/overlay.png)
+![Web UI search results](screenshots/web-ui.png)
+
+[Demo video](screenshots/demo.mp4)
 
 ## Components
 
 - **`app.py`** — Flask backend. Search YouTube, download via `yt-dlp`, transcode via `ffmpeg`. Optional native window via `pywebview`.
 - **`extension/`** — Chrome MV3 extension. Injects an overlay on `youtube.com/watch` pages with a format picker and download button. Talks to the local backend over HTTP.
-- **`templates/index.html`** — Standalone web UI for search + preview + download (used by the native window or browser).
+- **`templates/index.html`** — Standalone web UI for search, pasted tracklists, playlist preview, settings, and downloads.
+- **`screenshots/`** — README screenshots and demo media.
 
 ## Requirements
 
@@ -19,12 +22,22 @@ Local Python backend + Chrome extension for downloading YouTube audio as **MP3**
 
 ## Setup
 
+Clone the repo, install Python dependencies, and make sure `ffmpeg` is available:
+
 ```bash
-git clone <this-repo>
+git clone https://github.com/dikadk/youtubedownloader.git
 cd youtubedownloader
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
+
+Install `ffmpeg` if it is missing:
+
+```bash
+brew install ffmpeg
+```
+
+On Windows or Linux, install `ffmpeg` from your package manager and confirm `ffmpeg` is on `PATH`.
 
 ## Run
 
@@ -51,6 +64,20 @@ python3 -m venv .venv
 
 The overlay re-injects on YouTube SPA navigation. Format choice is persisted in `chrome.storage`.
 
+![Chrome extension overlay](screenshots/overlay.png)
+
+## Pasted tracklists
+
+Use **Paste tracklist** in the web UI when you already have a timestamped or dashed list:
+
+```text
+00:00 Song A - Artist A
+05:10 Song B - Artist B
+Song C - Artist C
+```
+
+Click **Preview** to parse the list, then **Download all** to search YouTube and download each track in the selected format.
+
 ## API
 
 | Method | Endpoint              | Body / Query                              | Returns                              |
@@ -62,6 +89,8 @@ The overlay re-injects on YouTube SPA navigation. Format choice is persisted in 
 | GET    | `/file/<jobId>`       |                                           | the audio file                       |
 | GET    | `/playlist?url=<spotifyUrl>` |                                    | `{ name, tracks: [...] }` — Spotify playlist preview |
 | POST   | `/playlist/download`  | `{ "url": "<spotifyUrl>", "format": "mp3" }` | `{ playlist_id, name, count }`   |
+| POST   | `/playlist/parse`     | `{ "text": "00:00 Title - Artist" }`      | `{ name, tracks, skipped }`          |
+| POST   | `/playlist/text/download` | `{ "tracks": [...], "format": "mp3" }` | `{ playlist_id, name, count }`       |
 | GET    | `/playlist/status/<plId>` |                                       | `{ status, progress, tracks: [...] }`|
 | GET    | `/playlist/zip/<plId>` |                                          | zip of all completed tracks          |
 | GET    | `/config`             |                                           | `{ download_dir, default, env }`     |
@@ -101,6 +130,7 @@ Why a backend at all? Pure Chrome extensions cannot transcode to MP3/FLAC — th
 ├── requirements.txt
 ├── templates/index.html            # Web UI (search + playlists + settings)
 ├── scripts/clean_filenames.py      # Strip job-id prefixes from old downloads
+├── screenshots/                    # README screenshots and demo media
 ├── extension/
 │   ├── manifest.json               # MV3
 │   ├── content.js                  # Injects overlay panel
