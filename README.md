@@ -4,7 +4,9 @@ Local Python backend + Chrome extension for downloading YouTube audio as **MP3**
 
 ![Web UI search results](screenshots/web-ui.png)
 
-[Demo video](screenshots/demo.mp4)
+## Watch Demo
+
+[Watch the demo video](screenshots/demo.mp4)
 
 ## Components
 
